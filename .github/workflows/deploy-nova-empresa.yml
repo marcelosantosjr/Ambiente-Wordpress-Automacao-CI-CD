@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       company_id:
-        description: 'ID da Empresa (Ex: empresac - minúsculo, sem espaços)'
+        description: 'ID da Empresa (Ex: celocompany3 - minusculo, sem espacos)'
         required: true
         type: string
       domain_name:
-        description: 'Domínio Completo (Ex: cliente.servicoweb.shop)'
+        description: 'Dominio Completo (Ex: celocompany.servicoweb.shop)'
         required: true
         type: string
       db_password:
@@ -20,7 +20,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Executar Automação na EC2 via SSH
+      - name: Executar Automacao na EC2 via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -29,17 +29,17 @@ jobs:
           script: |
             set -e
             
-            # 1. Definir Variáveis baseadas no Input do GitHub
             BASE_DIR="$HOME/wordpress-multi"
             COMPANY_DIR="$BASE_DIR/${{ github.event.inputs.company_id }}"
             DOMAIN="${{ github.event.inputs.domain_name }}"
+            CONF_FILE="$BASE_DIR/proxy-nginx/conf.d/${{ github.event.inputs.company_id }}.conf"
             
-            echo "Iniciando provisionamento para: $DOMAIN"
+            echo "Iniciando provisionamento isolado para: $DOMAIN"
             
-            # 2. Criar a pasta isolada da nova empresa
             mkdir -p $COMPANY_DIR
+            mkdir -p $BASE_DIR/proxy-nginx/conf.d
             
-            # 3. Criar o arquivo .env específico da empresa
+            # 1. Gerar arquivo .env
             cat << EOF > $COMPANY_DIR/.env
             DB_ROOT_PASSWORD=RootSecret${{ github.event.inputs.company_id }}2026
             DB_NAME=wp_${{ github.event.inputs.company_id }}
@@ -47,7 +47,7 @@ jobs:
             DB_PASSWORD=${{ github.event.inputs.db_password }}
             EOF
             
-            # 4. Criar o compose-app.yml customizado para esta empresa
+            # 2. Gerar compose-app.yml
             cat << EOF > $COMPANY_DIR/compose-app.yml
             services:
               db-${{ github.event.inputs.company_id }}:
@@ -89,56 +89,38 @@ jobs:
                 external: true
             EOF
             
-            # 5. Adicionar a configuração de roteamento no Nginx Central (Apenas bloco HTTP inicial)
-            # Verifica se o domínio já não está mapeado para evitar duplicidade
-            if ! grep -q "$DOMAIN" $BASE_DIR/proxy-nginx/default.conf; then
-              cat << EOF >> $BASE_DIR/proxy-nginx/default.conf
-
-            # Bloco Automático: $DOMAIN
+            # 3. Criar arquivo .conf temporario na porta 80 para validar o SSL
+            cat << EOF > $CONF_FILE
             server {
                 listen 80;
                 server_name $DOMAIN;
-                location /.well-known/acme-challenge/ { root /var/www/html; }
-                location / { try_files \$uri \$uri/ /index.php?\$args; }
+                root /var/www/html;
+                location /.well-known/acme-challenge/ { default_type "text/plain"; try_files \$uri =404; }
+                location / { return 404; }
             }
             EOF
-            fi
             
-            # 6. Recarregar o Nginx Central para reconhecer o novo domínio na porta 80
+            # 4. Recarregar o Proxy e subir o app
             cd $BASE_DIR
             docker compose -f compose-proxy.yml restart nginx-proxy
             
-            # 7. Subir a aplicação da nova empresa
             cd $COMPANY_DIR
             docker compose -f compose-app.yml up -d
             
-            # 8. Emitir o Certificado SSL via Certbot Central
+            # 5. Solicitar Certificado SSL via Certbot
             echo "Solicitando certificado SSL para $DOMAIN..."
             docker compose -f $BASE_DIR/compose-proxy.yml run --rm --entrypoint "certbot certonly --webroot --webroot-path=/var/www/html --email marcelojrtech@gmail.com --agree-tos --no-eff-email -d $DOMAIN" certbot
             
-            # 9. Atualizar o bloco do Nginx para ativar o HTTPS (Substituindo o bloco temporário)
-            sed -i "/# Bloco Automático: $DOMAIN/,+6d" $BASE_DIR/proxy-nginx/default.conf
-            
-            cat << EOF >> $BASE_DIR/proxy-nginx/default.conf
-
-            # Bloco Automático: $DOMAIN
+            # 6. Atualizar para o bloco HTTPS definitivo
+            cat << EOF > $CONF_FILE
             server {
                 listen 80;
                 server_name $DOMAIN;
-                
-                # CRÍTICO: Raiz global unificada estritamente para renovações do Certbot
                 root /var/www/html;
-                
-                location /.well-known/acme-challenge/ {
-                    default_type "text/plain";
-                    try_files \$uri =404;
-                }
-                
-                location / { 
-                    return 301 https://\$host\$request_uri; 
-                }
+                location /.well-known/acme-challenge/ { default_type "text/plain"; try_files \$uri =404; }
+                location / { return 301 https://\$host\$request_uri; }
             }
-            
+
             server {
                 listen 443 ssl;
                 server_name $DOMAIN;
@@ -168,7 +150,7 @@ jobs:
             }
             EOF
             
-            # 10. Reiniciar Nginx Proxy final
+            # 7. Reiniciar final
             cd $BASE_DIR
             docker compose -f compose-proxy.yml restart nginx-proxy
-            echo "Deploy de $DOMAIN concluído com sucesso e SSL ativo!"
+            echo "Deploy concluido com sucesso!"
