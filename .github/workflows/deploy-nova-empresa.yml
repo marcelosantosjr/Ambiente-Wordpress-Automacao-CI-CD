@@ -116,9 +116,11 @@ jobs:
             # 7. Injetar dinamicamente o volume estático no Nginx Mestre para corrigir o carregamento do CSS
             if ! grep -q "${COMPANY_ID}_wp_data_${COMPANY_ID}" $BASE_DIR/compose-proxy.yml; then
                 # Injeta o mapeamento de volume no container nginx-proxy
-                sed -i "/./proxy-nginx/certbot-html:/var/www/html/a \      - ${COMPANY_ID}_wp_data_${COMPANY_ID}:/var/www/html/${COMPANY_ID}" $BASE_DIR/compose-proxy.yml
-                # Injeta a declaração do volume externo no fim do arquivo
-                sed -i "/volumes:/a \  ${COMPANY_ID}_wp_data_${COMPANY_ID}:\n    external: true" $BASE_DIR/compose-proxy.yml
+                sed -i "/.\/proxy-nginx\/certbot-html:\/var\/www\/html/a \      - ${COMPANY_ID}_wp_data_${COMPANY_ID}:/var/www/html/${COMPANY_ID}" $BASE_DIR/compose-proxy.yml
+                
+                # Injeta a declaração do volume externo de forma segura no fim do arquivo
+                echo "  ${COMPANY_ID}_wp_data_${COMPANY_ID}:" >> $BASE_DIR/compose-proxy.yml
+                echo "    external: true" >> $BASE_DIR/compose-proxy.yml
             fi
             
             # 8. Sobrescrever com o Bloco Nginx Definitivo com HTTPS ativo e suporte a CSS/Admin
