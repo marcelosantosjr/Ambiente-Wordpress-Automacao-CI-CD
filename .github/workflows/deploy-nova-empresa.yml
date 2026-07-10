@@ -142,11 +142,11 @@ jobs:
             docker compose -f compose-app.yml up -d
 
             # ---------------------------------------------------------
-            # 6. Certificado SSL (comando correto, sem sobrescrever entrypoint)
+            # 6. Certificado SSL (sobrescreve o entrypoint do loop de renovação)
             # ---------------------------------------------------------
             echo "Solicitando certificado SSL para $DOMAIN..."
             cd "$BASE_DIR"
-            docker compose -f compose-proxy.yml run --rm certbot \
+            docker compose -f compose-proxy.yml run --rm --entrypoint certbot certbot \
               certonly --webroot --webroot-path=/var/www/html \
               --email marcelojrtech@gmail.com --agree-tos --no-eff-email \
               --non-interactive -d "$DOMAIN"
