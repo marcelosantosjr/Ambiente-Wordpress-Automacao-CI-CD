@@ -105,6 +105,7 @@ jobs:
             volumes:
               db_data___COMPANY_ID__:
               wp_data___COMPANY_ID__:
+                name: wp_data___COMPANY_ID__ 
 
             networks:
               web_proxy_network:
