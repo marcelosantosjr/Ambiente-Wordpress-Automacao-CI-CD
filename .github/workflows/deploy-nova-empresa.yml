@@ -168,3 +168,4 @@ jobs:
             docker compose -f compose-proxy.yml up -d
             
             echo "Deploy de $DOMAIN concluído com sucesso total!"
+            
