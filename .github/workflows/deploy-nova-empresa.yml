@@ -1,153 +1,197 @@
-name: Deploy New WordPress Tenant
+name: Deploy Nova Empresa (Multi-Tenant)
 
 on:
   workflow_dispatch:
     inputs:
-      tenant_id:
-        description: 'ID unico da empresa (ex: empresac)'
+      company_id:
+        description: 'ID único, minúsculo, apenas letras/números (Ex: jarvis)'
         required: true
         type: string
       domain_name:
-        description: 'Dominio do cliente (ex: empresac.com)'
+        description: 'Domínio completo (Ex: jarvis.servicoweb.shop)'
         required: true
-        type: string
-      wp_title:
-        description: 'Titulo do WordPress'
-        required: true
-        default: 'Meu WordPress'
         type: string
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Generate Secure Credentials
-        id: creds
-        run: |
-          echo "db_password=$(openssl rand -hex 16)" >> $GITHUB_OUTPUT
-          echo "wp_password=$(openssl rand -hex 16)" >> $GITHUB_OUTPUT
-
-      - name: Execute Remote Deployment via SSH
+      - name: Executar automação na EC2 via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
+          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: GITHUB_OUTPUT
+          envs: COMPANY_ID,DOMAIN
           script: |
-            set -e
-            
-            TENANT_ID="${{ inputs.tenant_id }}"
-            DOMAIN="${{ inputs.domain_name }}"
-            DB_PASSWORD="${{ steps.creds.outputs.db_password }}"
-            WP_PASSWORD="${{ steps.creds.outputs.wp_password }}"
-            
-            TENANT_DIR="/infra/tenants/$TENANT_ID"
-            NGINX_CONF_DIR="/infra/nginx-central/conf.d"
-            
-            # 1. Garantir diretorios
-            mkdir -p "$TENANT_DIR"
-            mkdir -p "$NGINX_CONF_DIR"
-            
-            # 2. Criar arquivo .env isolado
-            cat << EOF > "$TENANT_DIR/.env"
-            TENANT_ID=$TENANT_ID
-            DOMAIN=$DOMAIN
-            MYSQL_ROOT_PASSWORD=$(openssl rand -hex 16)
-            MYSQL_PASSWORD=$DB_PASSWORD
-            WORDPRESS_DB_PASSWORD=$DB_PASSWORD
-            EOF
-            
-            # 3. Criar docker-compose.yml do Tenant
-            cat << 'EOF' > "$TENANT_DIR/docker-compose.yml"
-            version: '3.8'
-            services:
-              db:
-                image: mysql:8.0
-                container_name: ${TENANT_ID}_db
-                restart: always
-                environment:
-                  MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-                  MYSQL_DATABASE: wordpress
-                  MYSQL_USER: wordpress
-                  MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-                volumes:
-                  - db_data:/var/lib/mysql
-                networks:
-                  - internal_net
+            set -euo pipefail
 
-              wordpress:
-                image: wordpress:6.4-php8.2-fpm-alpine
-                container_name: ${TENANT_ID}_wp
+            BASE_DIR="$HOME/wordpress-multi"
+            COMPANY_ID="${{ github.event.inputs.company_id }}"
+            DOMAIN="${{ github.event.inputs.domain_name }}"
+            CONF_FILE="$BASE_DIR/proxy-nginx/conf.d/$COMPANY_ID.conf"
+            LOCK_FILE="$BASE_DIR/locks/deploy.lock"
+
+            # ---------------------------------------------------------
+            # 0. Validação estrita de entrada (evita injeção/path traversal)
+            # ---------------------------------------------------------
+            if ! [[ "$COMPANY_ID" =~ ^[a-z0-9]{2,20}$ ]]; then
+              echo "ERRO: company_id inválido. Use apenas letras minúsculas e números (2-20 caracteres)."
+              exit 1
+            fi
+
+            if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+              echo "ERRO: domain_name inválido."
+              exit 1
+            fi
+
+            echo "Iniciando provisionamento isolado para: $DOMAIN"
+
+            mkdir -p "$BASE_DIR/$COMPANY_ID"
+            mkdir -p "$BASE_DIR/proxy-nginx/conf.d"
+            mkdir -p "$BASE_DIR/locks"
+
+            # ---------------------------------------------------------
+            # 1. Gerar senhas aleatórias no servidor (nunca vêm do GitHub)
+            # ---------------------------------------------------------
+            DB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9')
+            DB_PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9')
+
+            cat << EOF > "$BASE_DIR/$COMPANY_ID/.env"
+            DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD
+            DB_NAME=wp_${COMPANY_ID}
+            DB_USER=user_${COMPANY_ID}
+            DB_PASSWORD=$DB_PASSWORD
+            EOF
+            chmod 600 "$BASE_DIR/$COMPANY_ID/.env"
+
+            # ---------------------------------------------------------
+            # 2. compose-app.yml exclusivo do cliente (lê tudo do .env)
+            # ---------------------------------------------------------
+            cat << 'EOF' > "$BASE_DIR/$COMPANY_ID/compose-app.yml.tmp"
+            services:
+              db-__COMPANY_ID__:
+                image: mariadb:10.11
+                container_name: db___COMPANY_ID__
                 restart: always
-                depends_on:
-                  - db
+                env_file: .env
                 environment:
-                  WORDPRESS_DB_HOST: db:3306
-                  WORDPRESS_DB_USER: wordpress
-                  WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
-                  WORDPRESS_DB_NAME: wordpress
+                  MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+                  MYSQL_DATABASE: ${DB_NAME}
+                  MYSQL_USER: ${DB_USER}
+                  MYSQL_PASSWORD: ${DB_PASSWORD}
                 volumes:
-                  - wp_data:/var/var/www/html
+                  - db_data___COMPANY_ID__:/var/lib/mysql
                 networks:
-                  - internal_net
+                  - web_proxy_network
+
+              wp-__COMPANY_ID__:
+                depends_on:
+                  - db-__COMPANY_ID__
+                image: wordpress:6.4-php8.1-fpm-alpine
+                container_name: wp___COMPANY_ID__
+                restart: always
+                env_file: .env
+                environment:
+                  WORDPRESS_DB_HOST: db-__COMPANY_ID__:3306
+                  WORDPRESS_DB_USER: ${DB_USER}
+                  WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
+                  WORDPRESS_DB_NAME: ${DB_NAME}
+                volumes:
+                  - wp_data___COMPANY_ID__:/var/www/html
+                networks:
                   - web_proxy_network
 
             volumes:
-              db_data:
-              wp_data:
+              db_data___COMPANY_ID__:
+              wp_data___COMPANY_ID__:
 
             networks:
-              internal_net:
               web_proxy_network:
                 external: true
             EOF
+            # Substitui o placeholder pelo company_id real (já validado por regex acima)
+            sed "s/__COMPANY_ID__/${COMPANY_ID}/g" \
+              "$BASE_DIR/$COMPANY_ID/compose-app.yml.tmp" > "$BASE_DIR/$COMPANY_ID/compose-app.yml"
+            rm -f "$BASE_DIR/$COMPANY_ID/compose-app.yml.tmp"
 
-            # 4. Criar configuracao Nginx Temporaria (HTTP para validacao do Certbot)
-            cat << EOF > "$NGINX_CONF_DIR/$TENANT_ID.conf"
+            # ---------------------------------------------------------
+            # 3. Bloco HTTP temporário (validação Certbot)
+            # ---------------------------------------------------------
+            cat << EOF > "$CONF_FILE"
             server {
                 listen 80;
                 server_name $DOMAIN;
-
-                location /.well-known/acme-challenge/ {
-                    root /var/www/certbot;
-                }
-
-                location / {
-                    return 301 https://\$host\$request_uri;
-                }
+                root /var/www/html;
+                location /.well-known/acme-challenge/ { default_type "text/plain"; try_files \$uri =404; }
+                location / { return 404; }
             }
             EOF
 
-            # 5. Recarregar Nginx Central para aplicar HTTP temporario e iniciar App do tenant
-            docker exec nginx-proxy-central nginx -s reload
-            cd "$TENANT_DIR" && docker compose up -d
+            # ---------------------------------------------------------
+            # 4. Recarregar Nginx só (sem afetar outros tenants além de um breve reload)
+            # ---------------------------------------------------------
+            cd "$BASE_DIR"
+            docker compose -f compose-proxy.yml exec -T nginx-proxy nginx -s reload \
+              || docker compose -f compose-proxy.yml up -d --force-recreate nginx-proxy
 
-            # 6. Executar Certbot no Host para emitir o certificado TLS
-            # Nota: Certbot precisa estar instalado no host ou rodar via container temporario.
-            # Assumindo uso do certbot-cli instalado no host de forma nativa para simplicidade de escopo:
-            sudo certbot certonly --webroot -w /var/www/certbot -d "$DOMAIN" --email admin@$DOMAIN --agree-tos --non-interactive --keep-until-expiring
+            # ---------------------------------------------------------
+            # 5. Subir WordPress + banco do cliente
+            # ---------------------------------------------------------
+            cd "$BASE_DIR/$COMPANY_ID"
+            docker compose -f compose-app.yml up -d
 
-            # 7. Sobrescrever com a configuracao definitiva do Nginx (HTTPS + Proxy para FastCGI PHP-FPM)
-            # Como o WP usa FPM, mapeamos o proxy reverso apontando para a porta do FPM (9000) via rede do Docker
-            cat << EOF > "$NGINX_CONF_DIR/$TENANT_ID.conf"
+            # ---------------------------------------------------------
+            # 6. Certificado SSL (comando correto, sem sobrescrever entrypoint)
+            # ---------------------------------------------------------
+            echo "Solicitando certificado SSL para $DOMAIN..."
+            cd "$BASE_DIR"
+            docker compose -f compose-proxy.yml run --rm certbot \
+              certonly --webroot --webroot-path=/var/www/html \
+              --email marcelojrtech@gmail.com --agree-tos --no-eff-email \
+              --non-interactive -d "$DOMAIN"
+
+            # ---------------------------------------------------------
+            # 7. Registrar volume estático no Nginx central (com lock)
+            # ---------------------------------------------------------
+            (
+              flock -x 200
+
+              if ! grep -q "wp_data_${COMPANY_ID}:/var/www/html/${COMPANY_ID}" "$BASE_DIR/compose-proxy.yml"; then
+                sed -i "/certbot-html:\/var\/www\/html/a \      - wp_data_${COMPANY_ID}:/var/www/html/${COMPANY_ID}" \
+                  "$BASE_DIR/compose-proxy.yml"
+
+                # Garante que o volume externo aponta para o mesmo nome usado no compose-app.yml
+                cat << EOF >> "$BASE_DIR/compose-proxy.yml"
+              wp_data_${COMPANY_ID}:
+                external: true
+            EOF
+              fi
+            ) 200>"$LOCK_FILE"
+
+            # ---------------------------------------------------------
+            # 8. Bloco Nginx definitivo (HTTP->HTTPS + HTTPS com PHP-FPM)
+            # ---------------------------------------------------------
+            cat << EOF > "$CONF_FILE"
             server {
                 listen 80;
                 server_name $DOMAIN;
-                return 301 https://\$host\$request_uri;
+                root /var/www/html;
+                location /.well-known/acme-challenge/ { default_type "text/plain"; try_files \$uri =404; }
+                location / { return 301 https://\$host\$request_uri; }
             }
 
             server {
                 listen 443 ssl;
                 server_name $DOMAIN;
-
                 ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
                 ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
-                
-                ssl_protocols TLSv1.2 TLSv1.3;
-                ssl_ciphers HIGH:!aNULL:!MD5;
 
-                root /var/www/html;
+                ssl_protocols TLSv1.2 TLSv1.3;
+                ssl_prefer_server_ciphers on;
+                ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256';
+
+                root /var/www/html/$COMPANY_ID;
                 index index.php;
 
                 location / {
@@ -156,12 +200,21 @@ jobs:
 
                 location ~ \.php\$ {
                     include fastcgi_params;
-                    fastcgi_intercept_errors on;
-                    fastcgi_pass ${TENANT_ID}_wp:9000;
-                    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                    fastcgi_split_path_info ^(.+\.php)(/.+)\$;
+                    fastcgi_pass wp-$COMPANY_ID:9000;
+                    fastcgi_index index.php;
+                    fastcgi_param SCRIPT_FILENAME /var/www/html/\$fastcgi_script_name;
+                    fastcgi_param HTTPS on;
+                    fastcgi_param HTTP_X_FORWARDED_PROTO https;
                 }
             }
             EOF
 
-            # 8. Recarregar o Nginx Central com a configuracao HTTPS final
-            docker exec nginx-proxy-central nginx -s reload
+            # ---------------------------------------------------------
+            # 9. Recriar SOMENTE o Nginx central (sem derrubar outros tenants)
+            # ---------------------------------------------------------
+            cd "$BASE_DIR"
+            docker compose -f compose-proxy.yml up -d --force-recreate nginx-proxy
+
+            echo "Deploy de $DOMAIN concluído com sucesso!"
+            echo "Credenciais salvas em $BASE_DIR/$COMPANY_ID/.env (permissão 600)."
