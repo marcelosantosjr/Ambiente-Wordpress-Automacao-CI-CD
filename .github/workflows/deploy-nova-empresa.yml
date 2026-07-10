@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       company_id:
-        description: 'ID Único da Empresa (Ex: jarvis - minúsculo, sem espaços ou símbolos)'
+        description: 'ID Único da Empresa (Ex: celocompany - minúsculo, sem espaços)'
         required: true
         type: string
       domain_name:
-        description: 'Domínio Completo (Ex: jarvis.servicoweb.shop)'
+        description: 'Domínio Completo (Ex: celocompany.servicoweb.shop)'
         required: true
         type: string
       db_password:
@@ -36,9 +36,9 @@ jobs:
             
             echo "Iniciando provisionamento isolado para: $DOMAIN"
             
-            # Garantir existência dos diretórios cruciais
             mkdir -p $BASE_DIR/$COMPANY_ID
             mkdir -p $BASE_DIR/proxy-nginx/conf.d
+            mkdir -p $BASE_DIR/proxy-nginx/certbot-html
             
             # 1. Gerar arquivo .env da aplicação
             cat << EOF > $BASE_DIR/$COMPANY_ID/.env
@@ -101,9 +101,11 @@ jobs:
             }
             EOF
             
-            # 4. Recarregar Nginx para expor a rota temporária da porta 80
+            # 4. Recarregar Nginx para expor a rota temporária da porta 80 e aguardar estabilização
             cd $BASE_DIR
             docker compose -f compose-proxy.yml restart nginx-proxy
+            echo "Aguardando 5 segundos para o Nginx estabilizar na porta 80..."
+            sleep 5
             
             # 5. Subir a aplicação (WordPress + Banco) do cliente
             cd $BASE_DIR/$COMPANY_ID
@@ -168,4 +170,3 @@ jobs:
             docker compose -f compose-proxy.yml up -d
             
             echo "Deploy de $DOMAIN concluído com sucesso total!"
-            
