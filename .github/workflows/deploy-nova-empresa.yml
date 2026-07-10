@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       company_id:
-        description: 'ID Único da Empresa (Ex: celocompany - minúsculo, sem espaços)'
+        description: 'ID Único da Empresa (Ex: jarviscompany - minúsculo, sem espaços)'
         required: true
         type: string
       domain_name:
-        description: 'Domínio Completo (Ex: celocompany.servicoweb.shop)'
+        description: 'Domínio Completo (Ex: wordpress.servicoweb.shop)'
         required: true
         type: string
       db_password:
@@ -104,27 +104,24 @@ jobs:
             # 4. Recarregar Nginx para expor a rota temporária da porta 80 e aguardar estabilização
             cd $BASE_DIR
             docker compose -f compose-proxy.yml restart nginx-proxy
-            echo "Aguardando 5 segundos para o Nginx estabilizar na porta 80..."
             sleep 5
             
             # 5. Subir a aplicação (WordPress + Banco) do cliente
             cd $BASE_DIR/$COMPANY_ID
             docker compose -f compose-app.yml up -d
             
-            # 6. Solicitar Certificado SSL de forma automatizada (Não-interativa)
+            # 6. Solicitar Certificado SSL via Certbot
             echo "Solicitando certificado SSL via Certbot para $DOMAIN..."
             docker compose -f $BASE_DIR/compose-proxy.yml run --rm --entrypoint "certbot certonly --webroot --webroot-path=/var/www/html --email marcelojrtech@gmail.com --agree-tos --no-eff-email --non-interactive -d $DOMAIN" certbot
             
-            # 7. Injetar dinamicamente o volume estático no Nginx Mestre para corrigir o carregamento do CSS
+            # 7. Injetar dinamicamente o volume estático de forma segura sem quebrar o YAML
             if ! grep -q "${COMPANY_ID}_wp_data_${COMPANY_ID}" $BASE_DIR/compose-proxy.yml; then
-                # Injeta com segurança o mapeamento de volume dentro do bloco do container nginx-proxy
+                # Injeta mapeamento no bloco volumes do nginx-proxy
                 sed -i "/.\/proxy-nginx\/certbot-html:\/var\/www\/html/a \      - ${COMPANY_ID}_wp_data_${COMPANY_ID}:/var/www/html/${COMPANY_ID}" $BASE_DIR/compose-proxy.yml
                 
-                # Anexa com segurança a declaração de volume externo no final do arquivo, evitando quebrar o YAML
-                cat << EXTRA_VOLUMES >> $BASE_DIR/compose-proxy.yml
-                ${COMPANY_ID}_wp_data_${COMPANY_ID}:
-                external: true
-                EXTRA_VOLUMES
+                # Injeta a declaração externa de maneira simples no final
+                echo "  ${COMPANY_ID}_wp_data_${COMPANY_ID}:" >> $BASE_DIR/compose-proxy.yml
+                echo "    external: true" >> $BASE_DIR/compose-proxy.yml
             fi
             
             # 8. Sobrescrever com o Bloco Nginx Definitivo com HTTPS ativo e suporte a CSS/Admin
@@ -166,7 +163,7 @@ jobs:
             }
             EOF
             
-            # 9. Reinicialização completa para o Nginx assumir o novo volume e rotas SSL
+            # 9. Reinicialização completa estável do barramento de Proxy Central
             cd $BASE_DIR
             docker compose -f compose-proxy.yml down
             docker compose -f compose-proxy.yml up -d
