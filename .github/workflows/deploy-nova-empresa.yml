@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       domain_name:
-        description: 'Domínio completo (Ex: jarvis.servicoweb.shop)'
+        description: 'Domínio completo (Ex: loja.seudominio.com.br)'
         required: true
         type: string
 
